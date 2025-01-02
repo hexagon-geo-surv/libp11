@@ -20,8 +20,18 @@
 #ifndef _LIBP11_INT_H
 #define _LIBP11_INT_H
 
-#ifndef _WIN32
+#ifdef _WIN32
+#define LOG_EMERG       0
+#define LOG_ALERT       1
+#define LOG_CRIT        2
+#define LOG_ERR         3
+#define LOG_WARNING     4
+#define LOG_NOTICE      5
+#define LOG_INFO        6
+#define LOG_DEBUG       7
+#else
 #include "config.h"
+#include <syslog.h>
 #endif
 
 /* this code extensively uses deprecated features, so warnings are useless */
@@ -58,6 +68,7 @@ struct pkcs11_ctx_private {
 #endif
 	unsigned int forkid;
 	pthread_mutex_t fork_lock;
+	void (*vlog_a)(int, const char *, va_list); /* for the logging callback */
 };
 #define PRIVCTX(_ctx)		((PKCS11_CTX_private *) ((_ctx)->_private))
 
@@ -143,6 +154,8 @@ extern char *pkcs11_strdup(char *, size_t);
 #define EVP_PKEY_get0_EC_KEY(key) ((key)->pkey.ec)
 #endif
 
+extern void pkcs11_log(PKCS11_CTX_private *pctx, int level, const char *format, ...);
+
 /* Reinitializing the module after fork (if detected) */
 extern unsigned int get_forkid();
 extern int check_fork(PKCS11_CTX_private *ctx);
@@ -152,7 +165,6 @@ extern int check_object_fork(PKCS11_OBJECT_private *key);
 /* Other internal functions */
 extern void *C_LoadModule(const char *name, CK_FUNCTION_LIST_PTR_PTR);
 extern CK_RV C_UnloadModule(void *module);
-extern CK_RV C_IsModuleLoaded(void *module);
 extern void pkcs11_destroy_keys(PKCS11_SLOT_private *, unsigned int);
 extern void pkcs11_destroy_certs(PKCS11_SLOT_private *);
 extern int pkcs11_reload_object(PKCS11_OBJECT_private *);
@@ -220,7 +232,7 @@ extern int pkcs11_get_session(PKCS11_SLOT_private *, int rw, CK_SESSION_HANDLE *
 extern void pkcs11_put_session(PKCS11_SLOT_private *, CK_SESSION_HANDLE session);
 
 /* Get a list of all slots */
-extern int pkcs11_enumerate_slots(PKCS11_CTX_private * ctx,
+extern int pkcs11_enumerate_slots(PKCS11_CTX_private *ctx,
 			PKCS11_SLOT **slotsp, unsigned int *nslotsp);
 
 /* Get the slot_id from a slot as it is stored in private */
@@ -328,7 +340,7 @@ extern int pkcs11_store_public_key(PKCS11_SLOT_private *,
 	EVP_PKEY *pk, char *label, unsigned char *id, size_t id_len);
 
 /* Store certificate on a token */
-extern int pkcs11_store_certificate(PKCS11_SLOT_private *, X509 * x509,
+extern int pkcs11_store_certificate(PKCS11_SLOT_private *, X509 *x509,
 		char *label, unsigned char *id, size_t id_len,
 		PKCS11_CERT **ret_cert);
 
@@ -341,7 +353,7 @@ extern int pkcs11_generate_random(PKCS11_SLOT_private *, unsigned char *r, unsig
 /* Generate and store a private key on the token */
 extern int pkcs11_generate_key(PKCS11_SLOT_private *tpriv,
 	int algorithm, unsigned int bits,
-	char *label, unsigned char* id, size_t id_len);
+	char *label, unsigned char *id, size_t id_len);
 
 /* Generate and store an EC key pair on the token */
 extern int pkcs11_generate_ec_key(PKCS11_SLOT_private *slot, char* curve_name,
@@ -378,6 +390,9 @@ extern int pkcs11_private_decrypt(
 
 /* Retrieve PKCS11_KEY from an RSA key */
 extern PKCS11_OBJECT_private *pkcs11_get_ex_data_rsa(const RSA *rsa);
+
+/* Set PKCS11_KEY for an RSA key */
+void pkcs11_set_ex_data_rsa(RSA *rsa, PKCS11_OBJECT_private *key);
 
 /* Retrieve PKCS11_KEY from an EC_KEY */
 extern PKCS11_OBJECT_private *pkcs11_get_ex_data_ec(const EC_KEY *ec);
@@ -506,6 +521,21 @@ extern int pkcs11_generate_secret_key(PKCS11_CTX_private* ctx,
 extern int pkcs11_copy_session_state(PKCS11_SLOT_private* slot, 
 									 CK_SESSION_HANDLE dest, 
 									 CK_SESSION_HANDLE source);
+
+/* Set PKCS11_KEY for an EC_KEY */
+extern void pkcs11_set_ex_data_ec(EC_KEY *ec, PKCS11_OBJECT_private *key);
+
+/* Free the global RSA_METHOD */
+extern void pkcs11_rsa_method_free(void);
+
+/* Free the global EC_KEY_METHOD */
+extern void pkcs11_ec_key_method_free(void);
+
+/* Free the global ECDSA_METHOD */
+extern void pkcs11_ecdsa_method_free(void);
+
+/* Free the global ECDH_METHOD */
+extern void pkcs11_ecdh_method_free(void);
 
 #endif
 

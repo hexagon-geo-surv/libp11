@@ -343,7 +343,7 @@ int PKCS11_store_private_key(PKCS11_TOKEN *token,
 }
 
 int PKCS11_store_public_key(PKCS11_TOKEN *token,
-    	EVP_PKEY *pk, char *label, unsigned char *id, size_t id_len)
+		EVP_PKEY *pk, char *label, unsigned char *id, size_t id_len)
 {
 	PKCS11_SLOT_private *slot = PRIVSLOT(token->slot);
     if (check_slot_fork(slot) < 0)
@@ -522,5 +522,9 @@ int PKCS11_enumerate_slot_mechanisms(PKCS11_CTX *pctx,
     return pkcs11_enumerate_slot_mechanisms(ctx, slotid, mechp, mechcountp);
 }
 
+void PKCS11_set_vlog_a_method(PKCS11_CTX *pctx, PKCS11_VLOG_A_CB cb)
+{
+	PRIVCTX(pctx)->vlog_a = cb;
+}
 
 /* vim: set noexpandtab: */

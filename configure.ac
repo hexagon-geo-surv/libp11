@@ -1,11 +1,11 @@
 dnl -*- mode: m4; -*-
 
-AC_PREREQ(2.60)
+AC_PREREQ([2.69])
 
 # When bumping versions see also the LT version numbers below.
 define([PACKAGE_VERSION_MAJOR], [0])
 define([PACKAGE_VERSION_MINOR], [4])
-define([PACKAGE_VERSION_FIX], [13])
+define([PACKAGE_VERSION_FIX], [14])
 define([PACKAGE_SUFFIX], [_git])
 
 AC_INIT([libp11],[PACKAGE_VERSION_MAJOR.PACKAGE_VERSION_MINOR.PACKAGE_VERSION_FIX[]PACKAGE_SUFFIX])
@@ -85,7 +85,7 @@ AM_CONDITIONAL([LIBP11_OSSL_PROVIDER], [test x$LIBP11_OSSL_PROVIDER = xyes])
 # release, we should either stick to supporting a single openssl ABI
 # or bump the LT_OLDEST version sufficiently to avoid clashes.
 LIBP11_LT_REVISION="0"
-LIBP11_LT_CURRENT="8"
+LIBP11_LT_CURRENT="9"
 LIBP11_LT_AGE="$((${LIBP11_LT_CURRENT}-${LIBP11_LT_OLDEST}))"
 
 gl_LD_VERSION_SCRIPT
@@ -173,6 +173,13 @@ AC_ARG_WITH(
 	]
 )
 
+AC_ARG_ENABLE(
+	[static-engine],
+	[AS_HELP_STRING([--enable-static-engine], [enable static engine (libpkcs11.a) build @<:@disabled@:>@])],
+	,
+	[enable_static_engine="no"]
+)
+
 AC_ARG_WITH(
 	[providersdir],
 	[AS_HELP_STRING([--with-providersdir], [OpenSSL3 providers directory])],
@@ -210,21 +217,10 @@ AC_PROG_SED
 AC_PROG_MAKE_SET
 
 dnl Add libtool support.
-ifdef(
-	[LT_INIT],
-	[
-		LT_INIT([win32-dll])
-		LT_LANG([Windows Resource])
-	],
-	[
-		AC_LIBTOOL_WIN32_DLL
-		AC_LIBTOOL_RC
-		AC_PROG_LIBTOOL
-	]
-)
+LT_INIT([win32-dll])
+LT_LANG([Windows Resource])
 
 dnl Checks for header files.
-AC_HEADER_STDC
 AC_HEADER_SYS_WAIT
 AC_CHECK_HEADERS([ \
 	errno.h fcntl.h malloc.h stdlib.h \
@@ -284,6 +280,7 @@ AC_SUBST([SHARED_EXT], $(eval echo "${shrext_cmds}"))
 AM_CONDITIONAL([WIN32], [test "${WIN32}" = "yes"])
 AM_CONDITIONAL([CYGWIN], [test "${CYGWIN}" = "yes"])
 AM_CONDITIONAL([ENABLE_API_DOC], [test "${enable_api_doc}" = "yes"])
+AM_CONDITIONAL([ENABLE_STATIC_ENGINE], [test "${enable_static_engine}" = "yes"])
 
 if test "${enable_pedantic}" = "yes"; then
 	enable_strict="yes";
@@ -343,6 +340,7 @@ Engine directory:        ${enginesexecdir}
 Provider directory:      ${providersexecdir}
 Default PKCS11 module:   ${pkcs11_module}
 API doc support:         ${enable_api_doc}
+Static PKCS#11 engine    ${enable_static_engine}
 
 Host:                    ${host}
 Compiler:                ${CC}

@@ -19,6 +19,11 @@
 #include "libp11-int.h"
 #include <string.h>
 
+/* Global number of active PKCS11_CTX objects */
+static int pkcs11_global_data_refs = 0;
+
+static void pkcs11_global_data_free(void);
+
 /*
  * Create a new context
  */
@@ -42,6 +47,8 @@ PKCS11_CTX *pkcs11_CTX_new(void)
 	cpriv->forkid = get_forkid();
 	pthread_mutex_init(&cpriv->fork_lock, 0);
 
+	pkcs11_global_data_refs++;
+
 	return ctx;
 fail:
 	OPENSSL_free(cpriv);
@@ -63,12 +70,31 @@ void pkcs11_CTX_init_args(PKCS11_CTX *ctx, const char *init_args)
 }
 
 /*
+ * Tell the PKCS11 to initialize itself
+ */
+static int pkcs11_initialize(PKCS11_CTX_private *cpriv)
+{
+	CK_C_INITIALIZE_ARGS args;
+	int rv;
+
+	memset(&args, 0, sizeof(args));
+	/* Unconditionally say using OS locking primitives is OK */
+	args.flags |= CKF_OS_LOCKING_OK;
+	args.pReserved = cpriv->init_args;
+	rv = cpriv->method->C_Initialize(&args);
+	if (rv && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
+		CKRerr(P11_F_PKCS11_CTX_LOAD, rv);
+		return -1;
+	}
+	return 0;
+}
+
+/*
  * Load the shared library, and initialize it.
  */
 int pkcs11_CTX_load(PKCS11_CTX *ctx, const char *name)
 {
 	PKCS11_CTX_private *cpriv = PRIVCTX(ctx);
-	CK_C_INITIALIZE_ARGS args;
 	CK_INFO ck_info;
 	int rv;
 
@@ -78,16 +104,9 @@ int pkcs11_CTX_load(PKCS11_CTX *ctx, const char *name)
 		return -1;
 	}
 
-	/* Tell the PKCS11 to initialize itself */
-	memset(&args, 0, sizeof(args));
-	/* Unconditionally say using OS locking primitives is OK */
-	args.flags |= CKF_OS_LOCKING_OK;
-	args.pReserved = cpriv->init_args;
-	rv = cpriv->method->C_Initialize(&args);
-	if (rv && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
+	if (pkcs11_initialize(cpriv)) {
 		C_UnloadModule(cpriv->handle);
 		cpriv->handle = NULL;
-		CKRiniterr(CKR_F_PKCS11_CTX_LOAD, rv);
 		return -1;
 	}
 
@@ -113,28 +132,12 @@ int pkcs11_CTX_load(PKCS11_CTX *ctx, const char *name)
 /*
  * Reinitialize (e.g., after a fork).
  */
-int pkcs11_CTX_reload(PKCS11_CTX_private *ctx)
+int pkcs11_CTX_reload(PKCS11_CTX_private *cpriv)
 {
-	CK_C_INITIALIZE_ARGS _args;
-	CK_C_INITIALIZE_ARGS *args = NULL;
-	int rv;
-
-	if (!ctx->method) /* Module not loaded */
+	if (!cpriv->method) /* Module not loaded */
 		return 0;
 
-	/* Tell the PKCS11 to initialize itself */
-	if (ctx->init_args) {
-		memset(&_args, 0, sizeof(_args));
-		args = &_args;
-		args->pReserved = ctx->init_args;
-	}
-	rv = ctx->method->C_Initialize(args);
-	if (rv && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
-		CKRiniterr(CKR_F_PKCS11_CTX_RELOAD, rv);
-		return -1;
-	}
-
-	return 0;
+	return pkcs11_initialize(cpriv);
 }
 
 /*
@@ -144,19 +147,15 @@ void pkcs11_CTX_unload(PKCS11_CTX *ctx)
 {
 	PKCS11_CTX_private *cpriv = PRIVCTX(ctx);
 
-	/* Avoid cases when an unsafe exit first cleans up
-	 * the module library and only after that calls the
-	 * provider cleanup.
-	 */
-	if (C_IsModuleLoaded(ctx->module_name) == CKR_OK)
-	{
-		/* Tell the PKCS11 library to shut down */
-		if (cpriv->forkid == get_forkid())
-			cpriv->method->C_Finalize(NULL);
+	if (!cpriv->method) /* Module not loaded */
+		return;
 
-		/* Unload the module */
-		C_UnloadModule(cpriv->handle);
-	}
+	/* Tell the PKCS11 library to shut down */
+	if (cpriv->forkid == get_forkid())
+		cpriv->method->C_Finalize(NULL);
+
+	/* Unload the module */
+	C_UnloadModule(cpriv->handle);
 	cpriv->handle = NULL;
 }
 
@@ -167,11 +166,6 @@ void pkcs11_CTX_free(PKCS11_CTX *ctx)
 {
 	PKCS11_CTX_private *cpriv = PRIVCTX(ctx);
 
-	/* TODO: Move the global methods and ex_data indexes into
-	 * the ctx structure, so they can be safely deallocated here:
-	PKCS11_rsa_method_free(ctx);
-	PKCS11_ecdsa_method_free(ctx);
-	*/
 	if (cpriv->init_args) {
 		OPENSSL_free(cpriv->init_args);
 	}
@@ -183,6 +177,28 @@ void pkcs11_CTX_free(PKCS11_CTX *ctx)
 	OPENSSL_free(ctx->description);
 	OPENSSL_free(ctx->_private);
 	OPENSSL_free(ctx);
+
+	if (--pkcs11_global_data_refs == 0)
+		pkcs11_global_data_free();
+}
+
+static void pkcs11_global_data_free(void)
+{
+#ifndef OPENSSL_NO_RSA
+	pkcs11_rsa_method_free();
+#endif
+#if OPENSSL_VERSION_NUMBER >= 0x10100002L
+#ifndef OPENSSL_NO_EC
+	pkcs11_ec_key_method_free();
+#endif /* OPENSSL_NO_EC */
+#else /* OPENSSL_VERSION_NUMBER */
+#ifndef OPENSSL_NO_ECDSA
+	pkcs11_ecdsa_method_free();
+#endif /* OPENSSL_NO_ECDSA */
+#ifndef OPENSSL_NO_ECDH
+	pkcs11_ecdh_method_free();
+#endif /* OPENSSL_NO_ECDH */
+#endif /* OPENSSL_VERSION_NUMBER */
 }
 
 /* vim: set noexpandtab: */

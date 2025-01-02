@@ -29,6 +29,7 @@
 #define PKCS11_ENGINE_NAME "pkcs11 engine"
 
 static int pkcs11_idx = -1;
+static int shutdown_mode = 0;
 
 /* The definitions for control commands specific to this engine */
 
@@ -47,6 +48,10 @@ static const ENGINE_CMD_DEFN engine_cmd_defns[] = {
 		"PIN",
 		"Specifies the pin code",
 		ENGINE_CMD_FLAG_STRING},
+	{CMD_DEBUG_LEVEL,
+		"DEBUG_LEVEL",
+		"Set the debug level: 0=emerg, 1=alert, 2=crit, 3=err, 4=warning, 5=notice (default), 6=info, 7=debug",
+		ENGINE_CMD_FLAG_NUMERIC},
 	{CMD_VERBOSE,
 		"VERBOSE",
 		"Print additional details",
@@ -79,6 +84,10 @@ static const ENGINE_CMD_DEFN engine_cmd_defns[] = {
 		"RE_ENUMERATE",
 		"re enumerate slots",
 		ENGINE_CMD_FLAG_NO_INPUT},
+	{CMD_VLOG_A,
+		"VLOG_A",
+		"Set the logging callback",
+		ENGINE_CMD_FLAG_INTERNAL},
 	{0, NULL, NULL, 0}
 };
 
@@ -113,17 +122,6 @@ static int engine_destroy(ENGINE *engine)
 	if (!ctx)
 		return 0;
 
-	/* ENGINE_remove() invokes our engine_destroy() function with
-	 * CRYPTO_LOCK_ENGINE / global_engine_lock acquired.
-	 * Any attempt to re-acquire the lock either by directly
-	 * invoking OpenSSL functions, or indirectly via PKCS#11 modules
-	 * that use OpenSSL engines, causes a deadlock. */
-	/* Our workaround is to skip ctx_finish() entirely, as a memory
-	 * leak is better than a deadlock. */
-#if 0
-	rv &= ctx_finish(ctx);
-#endif
-
 	rv &= ctx_destroy(ctx);
 	ENGINE_set_ex_data(engine, pkcs11_idx, NULL);
 	ERR_unload_ENG_strings();
@@ -150,20 +148,14 @@ static int engine_finish(ENGINE *engine)
 	if (!ctx)
 		return 0;
 
-	/* ENGINE_cleanup() used by OpenSSL versions before 1.1.0 invokes
-	 * our engine_finish() function with CRYPTO_LOCK_ENGINE acquired.
-	 * Any attempt to re-acquire CRYPTO_LOCK_ENGINE either by directly
-	 * invoking OpenSSL functions, or indirectly via PKCS#11 modules
-	 * that use OpenSSL engines, causes a deadlock. */
-	/* Our workaround is to skip ctx_finish() for the affected OpenSSL
-	 * versions, as a memory leak is better than a deadlock. */
-	/* We cannot simply temporarily release CRYPTO_LOCK_ENGINE here, as
-	 * engine_finish() is also executed from ENGINE_finish() without
-	 * acquired CRYPTO_LOCK_ENGINE, and there is no way with to check
-	 * whether a lock is already acquired with OpenSSL < 1.1.0 API. */
-#if OPENSSL_VERSION_NUMBER >= 0x10100005L && !defined(LIBRESSL_VERSION_NUMBER)
-	rv &= ctx_finish(ctx);
-#endif
+	/* PKCS#11 modules that register their own atexit() callbacks may
+	 * already have been cleaned up by the time OpenSSL's atexit() callback
+	 * is executed. As a result, a crash occurs with certain versions of
+	 * OpenSSL and SoftHSM2. The workaround skips the execution of
+	 * ctx_finish() during OpenSSL's cleanup, converting the crash into
+	 * a harmless memory leak at exit. */
+	if (!shutdown_mode)
+		rv &= ctx_finish(ctx);
 
 	return rv;
 }
@@ -190,6 +182,32 @@ static EVP_PKEY *load_privkey(ENGINE *engine, const char *s_key_id,
 	if (!ctx)
 		return 0;
 	bind_helper_methods(engine);
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	/*
+	 * A workaround for an OpenSSL bug affecting the handling of foreign
+	 * EVP_PKEY objects: https://github.com/openssl/openssl/pull/23063
+	 * Affected OpenSSL versions:
+	 *  - 3.0.12 (0x300000c0L) - 3.0.13 (0x300000d0L)
+	 *  - 3.1.4 (0x30100040L) - 3.1.5 (0x30100050L)
+	 *  - 3.2.0 (0x30200000L) - 3.2.1 (0x30200010L)
+	 * This workaround may disrupt rare deployments
+	 * that use foreign keys from multiple engines.
+	 */
+	{
+		unsigned long ver = OpenSSL_version_num();
+
+		if ((ver >= 0x300000c0L && ver <= 0x300000d0L) ||
+				(ver >= 0x30100040L && ver <= 0x30100050L) ||
+				(ver >= 0x30200000L && ver <= 0x30200010L)) {
+			if (ENGINE_set_default_string(engine, "PKEY_CRYPTO")) {
+				ctx_log(ctx, LOG_NOTICE, "Workaround for %s enabled\n",
+					OpenSSL_version(OPENSSL_VERSION));
+			} else {
+				ctx_log(ctx, LOG_WARNING, "Failed to set PKEY_CRYPTO default engine\n");
+			}
+		}
+	}
+#endif
 	pkey = ctx_load_privkey(ctx, s_key_id, ui_method, callback_data);
 #ifdef EVP_F_EVP_PKEY_SET1_ENGINE
 	/* EVP_PKEY_set1_engine() is required for OpenSSL 1.1.x,
@@ -209,7 +227,9 @@ static int engine_ctrl(ENGINE *engine, int cmd, long i, void *p, void (*f) ())
 	ctx = get_ctx(engine);
 	if (!ctx)
 		return 0;
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
 	bind_helper_methods(engine);
+#endif
 	return ctx_engine_ctrl(ctx, cmd, i, p, f);
 }
 
@@ -245,7 +265,7 @@ static int bind_helper_methods(ENGINE *e)
 #ifndef OPENSSL_NO_RSA
 			!ENGINE_set_RSA(e, PKCS11_get_rsa_method()) ||
 #endif
-#if OPENSSL_VERSION_NUMBER  >= 0x10100002L
+#if OPENSSL_VERSION_NUMBER >= 0x10100002L
 #ifndef OPENSSL_NO_EC
 			/* PKCS11_get_ec_key_method combines ECDSA and ECDH */
 			!ENGINE_set_EC(e, PKCS11_get_ec_key_method()) ||
@@ -265,16 +285,22 @@ static int bind_helper_methods(ENGINE *e)
 	}
 }
 
+static void exit_callback(void)
+{
+	shutdown_mode = 1;
+}
+
 static int bind_fn(ENGINE *e, const char *id)
 {
 	if (id && (strcmp(id, PKCS11_ENGINE_ID) != 0)) {
-		fprintf(stderr, "bad engine id\n");
+		ctx_log(NULL, LOG_ERR, "bad engine id\n");
 		return 0;
 	}
 	if (!bind_helper(e)) {
-		fprintf(stderr, "bind failed\n");
+		ctx_log(NULL, LOG_ERR, "bind failed\n");
 		return 0;
 	}
+	atexit(exit_callback);
 	return 1;
 }
 

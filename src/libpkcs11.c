@@ -69,7 +69,7 @@ C_LoadModule(const char *mspec, CK_FUNCTION_LIST_PTR_PTR funcs)
 
 	if (!mod->handle) {
 #ifndef WIN32
-		fprintf(stderr, "%s\n", dlerror());
+		pkcs11_log(NULL, LOG_ERR, "%s\n", dlerror());
 #endif
 		goto failed;
 	}
@@ -89,7 +89,7 @@ C_LoadModule(const char *mspec, CK_FUNCTION_LIST_PTR_PTR funcs)
 
 	if (!c_get_function_list) {
 #ifndef WIN32
-		fprintf(stderr, "%s\n", dlerror());
+		pkcs11_log(NULL, LOG_ERR, "%s\n", dlerror());
 #endif
 		goto failed;
 	}
@@ -127,22 +127,6 @@ C_UnloadModule(void *module)
 	OPENSSL_free(mod);
 
 	return CKR_OK;
-}
-
-/*
- * Check if the pkcs11 module still opened and available.
- * Returns CK_OK if loaded.
- */
-CK_RV
-C_IsModuleLoaded(void *module)
-{
-#ifdef WIN32
-	void* handle = GetModuleHandleA(module);
-#else
-	void* handle = dlopen(module, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
-#endif
-
-	return (handle) ? CKR_OK : CKR_LIBRARY_LOAD_FAILED;
 }
 
 /* vim: set noexpandtab: */

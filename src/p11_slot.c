@@ -131,7 +131,7 @@ static void pkcs11_wipe_cache(PKCS11_SLOT_private *slot)
 	pkcs11_destroy_certs(slot);
 }
 
-int pkcs11_get_session(PKCS11_SLOT_private * slot, int rw, CK_SESSION_HANDLE *sessionp)
+int pkcs11_get_session(PKCS11_SLOT_private *slot, int rw, CK_SESSION_HANDLE *sessionp)
 {
 	PKCS11_CTX_private *ctx = slot->ctx;
 	int rv = CKR_OK;
@@ -178,6 +178,10 @@ int pkcs11_get_session(PKCS11_SLOT_private * slot, int rw, CK_SESSION_HANDLE *se
 			if (rv == CKR_OK) {
 				slot->num_sessions++;
 				break;
+			}
+			if (rv == CKR_TOKEN_NOT_RECOGNIZED) {
+				pthread_mutex_unlock(&slot->lock);
+				return -1;
 			}
 
 			/* Remember the maximum session count */
@@ -536,7 +540,7 @@ void pkcs11_release_all_slots(PKCS11_SLOT *slots, unsigned int nslots)
 {
 	unsigned int i;
 
-	for (i=0; i < nslots; i++)
+	for (i = 0; i < nslots; i++)
 		pkcs11_release_slot(&slots[i]);
 	OPENSSL_free(slots);
 }
